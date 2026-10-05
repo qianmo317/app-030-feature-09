@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from 'vue'
-import { getRule, projectsUsingRule, saveRule, store } from '../logic/store'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { deleteRule, getRule, projectsUsingRule, saveRule, store } from '../logic/store'
 import { alignToStep } from '../logic/sizeRules'
 import { cmToHalfUnits, formatHalfUnits } from '../logic/precision'
+import { listAudit, type AuditEntry } from '../logic/audit'
 import type { FitRange, Gender, SizeRule } from '../logic/types'
 
 function cloneRule(rule: SizeRule): SizeRule {
@@ -15,6 +16,7 @@ const form = ref<SizeRule>(cloneRule(getRule(selectedVersion.value)))
 const newVersion = reactive({ version: '', label: '', effectiveFrom: '' })
 const errorText = ref('')
 const okText = ref('')
+const auditEntries = ref<AuditEntry[]>([])
 
 const currentRule = computed(() => getRule(selectedVersion.value))
 const usedBy = computed(() => projectsUsingRule(selectedVersion.value))
@@ -29,6 +31,18 @@ watch(selectedVersion, (version) => {
   errorText.value = ''
   okText.value = ''
 })
+
+onMounted(async () => {
+  await refreshAudit()
+})
+
+async function refreshAudit(): Promise<void> {
+  auditEntries.value = (await listAudit()).slice(0, 50)
+}
+
+function formatAuditTime(at: number): string {
+  return new Date(at).toLocaleString('zh-CN')
+}
 
 const genderLabel: Record<Gender, string> = { male: '男装', female: '女装' }
 
@@ -117,6 +131,43 @@ async function saveAsNew(): Promise<void> {
   selectedVersion.value = version
   okText.value = `已新建版本 ${version}；既有项目仍按各自锁定的版本解释，结果不变`
 }
+
+/** 删除自定义版本：内置与被项目引用的版本拦下并说明原因，无人引用的版本确认后删除 */
+async function removeRule(rule: SizeRule): Promise<void> {
+  errorText.value = ''
+  okText.value = ''
+  if (!rule.builtin && projectsUsingRule(rule.version).length === 0) {
+    const confirmed = window.confirm(
+      `确认删除自定义版本 ${rule.version}（${rule.label}）？\n` +
+        '删除后该版本从规则列表与新建项目的版本下拉里一起消失；' +
+        '已导出的下单表不受影响，锁定过该版本的项目仍按各自锁定的版本读取规则。'
+    )
+    if (!confirmed) return
+  }
+  const result = await deleteRule(rule.version)
+  if (!result.ok) {
+    if (result.reason === 'in_use') {
+      errorText.value =
+        `版本 ${rule.version} 正被 ${result.usedBy.length} 个项目使用，不能删除：` +
+        result.usedBy.map((project) => `「${project.name}」`).join('、') +
+        '。如需删除，请先删除这些项目或等它们不再引用该版本。'
+    } else if (result.reason === 'builtin') {
+      errorText.value = `内置版本 ${rule.version} 为只读基线，任何情况下不可删除。`
+    } else {
+      errorText.value = `版本 ${rule.version} 不存在或已被删除。`
+    }
+    await refreshAudit()
+    return
+  }
+  if (selectedVersion.value === rule.version) {
+    // 显式切到剩余的第一个版本，避免表单停留在已删除版本上
+    selectedVersion.value = store.rules[0]?.version ?? ''
+  }
+  okText.value =
+    `已删除自定义版本 ${rule.version}（${rule.label}）：该版本未被任何项目引用，已从版本列表与新建项目下拉移除；` +
+    '已导出的下单表不受影响。'
+  await refreshAudit()
+}
 </script>
 
 <template>
@@ -132,7 +183,7 @@ async function saveAsNew(): Promise<void> {
       <div class="card-head">
         <h2>规则版本列表（{{ store.rules.length }}）</h2>
         <div class="spacer"></div>
-        <span class="hint">内置版本为只读，改规则请「另存为新版本」</span>
+        <span class="hint">内置版本为只读且不可删除；自定义版本无人引用时可删除，删除与拦下都会留痕</span>
       </div>
       <div class="table-wrap">
         <table class="data-table">
@@ -149,6 +200,7 @@ async function saveAsNew(): Promise<void> {
               <th>女装型别</th>
               <th>引用项目</th>
               <th>来源</th>
+              <th>操作</th>
             </tr>
           </thead>
           <tbody>
@@ -174,6 +226,17 @@ async function saveAsNew(): Promise<void> {
                 </span>
               </td>
               <td>{{ rule.builtin ? '内置' : '自定义' }}</td>
+              <td>
+                <button
+                  v-if="!rule.builtin"
+                  class="btn btn-sm btn-danger"
+                  type="button"
+                  @click="removeRule(rule)"
+                >
+                  删除
+                </button>
+                <span v-else class="hint" title="内置版本为只读基线，任何情况下不可删除">不可删</span>
+              </td>
             </tr>
           </tbody>
         </table>
@@ -345,6 +408,44 @@ async function saveAsNew(): Promise<void> {
             </div>
           </div>
         </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h3>版本删除留痕（本机记录，{{ auditEntries.length }} 条）</h3>
+        <div class="spacer"></div>
+        <span class="hint">删除与删除被拦下的动作都会记录在本机 IndexedDB，不上传</span>
+      </div>
+      <div v-if="auditEntries.length === 0" class="empty">暂无删除或拦下记录。</div>
+      <div v-else class="table-wrap">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>时间</th>
+              <th>动作</th>
+              <th>版本</th>
+              <th>说明</th>
+              <th>操作人</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="entry in auditEntries" :key="entry.id">
+              <td>{{ formatAuditTime(entry.at) }}</td>
+              <td>
+                <span class="badge" :class="entry.action === 'rule_deleted' ? 'badge-info' : 'badge-warn'">
+                  {{ entry.action === 'rule_deleted' ? '已删除' : '删除被拦下' }}
+                </span>
+              </td>
+              <td>
+                <b>{{ entry.version }}</b>
+                <span class="hint">（{{ entry.label }}）</span>
+              </td>
+              <td>{{ entry.detail }}</td>
+              <td>{{ entry.operator }}</td>
+            </tr>
+          </tbody>
+        </table>
       </div>
     </div>
   </section>

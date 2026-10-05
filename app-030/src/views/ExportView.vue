@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { useRoute } from 'vue-router'
-import { ensureMerged, flushProject, getProject, getRule, store } from '../logic/store'
+import { ensureMerged, flushProject, getProject, getRule, isRuleActive, store } from '../logic/store'
 import { buildSummary, conservationText } from '../logic/merge'
 import {
   buildOrderSheet,
@@ -127,7 +127,9 @@ const genderText = (gender: string): string => (gender === 'male' ? '男' : '女
       <div>
         <h1>{{ project.name }} · 下单表与明细导出</h1>
         <div class="sub">
-          依据规则版本 <b>{{ project.ruleVersion }}</b>（{{ rule.label }}）｜ 总录入 {{ summary.totals.totalRows }} ｜
+          依据规则版本 <b>{{ project.ruleVersion }}</b>（{{ rule.label }}）
+          <span v-if="!isRuleActive(project.ruleVersion)" class="badge badge-warn">该版本已从规则列表移除，项目仍按锁定版本解释</span>
+          ｜ 总录入 {{ summary.totals.totalRows }} ｜
           有效 {{ summary.totals.validRows }} ｜ 总套数 {{ summary.totals.accountedQty }}
         </div>
       </div>

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { useRoute } from 'vue-router'
-import { ensureMerged, getProject, getRule, store } from '../logic/store'
+import { ensureMerged, getProject, getRule, isRuleActive, store } from '../logic/store'
 import { buildSummary, conservationText } from '../logic/merge'
 import { exportBaseName, stockAdviceRows, summaryRowLabel } from '../logic/exporter'
 import { downloadText, toCsvText } from '../logic/csv'
@@ -58,7 +58,9 @@ function exportStockAdvice(): void {
       <div>
         <h1>{{ project.name }} · 汇总表与守恒校验</h1>
         <div class="sub">
-          依据规则版本 <b>{{ project.ruleVersion }}</b>（{{ rule.label }}）｜ 号型 × 性别 × 数量，含班级/车间小计与批次合计
+          依据规则版本 <b>{{ project.ruleVersion }}</b>（{{ rule.label }}）
+          <span v-if="!isRuleActive(project.ruleVersion)" class="badge badge-warn">该版本已从规则列表移除，项目仍按锁定版本解释</span>
+          ｜ 号型 × 性别 × 数量，含班级/车间小计与批次合计
         </div>
       </div>
       <div class="spacer"></div>

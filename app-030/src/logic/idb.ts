@@ -3,10 +3,13 @@
  */
 
 const DB_NAME = 'app030-uniform-tally'
-const DB_VERSION = 1
+const DB_VERSION = 2
 
 export const STORE_PROJECTS = 'projects'
 export const STORE_RULES = 'rules'
+/** 已删除的自定义规则版本归档：项目仍可按锁定版本读回规则，但不出现在版本列表与新建项目下拉里 */
+export const STORE_RULES_ARCHIVE = 'rules_archive'
+export const STORE_AUDIT = 'audit'
 export const STORE_META = 'meta'
 
 export type MetaEntry = { key: string; value: string }
@@ -28,6 +31,10 @@ export function openDb(): Promise<IDBDatabase> {
         const db = request.result
         if (!db.objectStoreNames.contains(STORE_PROJECTS)) db.createObjectStore(STORE_PROJECTS, { keyPath: 'id' })
         if (!db.objectStoreNames.contains(STORE_RULES)) db.createObjectStore(STORE_RULES, { keyPath: 'version' })
+        if (!db.objectStoreNames.contains(STORE_RULES_ARCHIVE)) {
+          db.createObjectStore(STORE_RULES_ARCHIVE, { keyPath: 'version' })
+        }
+        if (!db.objectStoreNames.contains(STORE_AUDIT)) db.createObjectStore(STORE_AUDIT, { keyPath: 'id' })
         if (!db.objectStoreNames.contains(STORE_META)) db.createObjectStore(STORE_META, { keyPath: 'key' })
       }
       request.onsuccess = () => resolve(request.result)

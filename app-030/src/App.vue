@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue'
 import { RouterLink, RouterView, useRoute } from 'vue-router'
-import { getProject, initStore, setOperator, store } from './logic/store'
+import { getProject, initStore, isRuleActive, setOperator, store } from './logic/store'
 
 const route = useRoute()
 const operatorDraft = ref(store.operator)
@@ -70,6 +70,13 @@ async function commitOperator(): Promise<void> {
         <RouterLink v-for="tab in tabs" :key="tab.to" :to="tab.to">{{ tab.label }}</RouterLink>
         <span v-if="project" class="badge badge-info" style="align-self: center; margin-left: auto">
           规则 {{ project.ruleVersion }} ｜ 已录入 {{ project.persons.length }} 条
+        </span>
+        <span
+          v-if="project && !isRuleActive(project.ruleVersion)"
+          class="badge badge-warn"
+          style="align-self: center"
+        >
+          该版本已从规则列表移除，项目仍按锁定版本解释
         </span>
       </div>
     </div>

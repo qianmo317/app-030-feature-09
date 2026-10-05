@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, reactive, ref } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 import { createProject, deleteProject, store } from '../logic/store'
 import { DEFAULT_RULE_VERSION } from '../logic/sizeRules'
@@ -16,6 +16,16 @@ const form = reactive({
 
 const message = ref('')
 const errorText = ref('')
+
+// 规则版本被删除后，下拉里已没有该选项：把选择收回到还在列表里的版本，避免下拉空白或锁定失效版本
+watch(
+  () => store.rules.map((rule) => rule.version),
+  (versions) => {
+    if (!versions.includes(form.ruleVersion)) {
+      form.ruleVersion = versions.includes(DEFAULT_RULE_VERSION) ? DEFAULT_RULE_VERSION : (versions[0] ?? '')
+    }
+  }
+)
 
 const kindLabel: Record<ProjectKind, string> = {
   school: '学校（校服）',

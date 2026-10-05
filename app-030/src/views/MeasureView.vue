@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { flushProject, getProject, getRule, persistProject, store } from '../logic/store'
+import { flushProject, getProject, getRule, isRuleActive, persistProject, store } from '../logic/store'
 import { analyzeDraft, findDuplicateIds, makePersonId, type PersonDraft } from '../logic/analyze'
 import { estimateInitialSize, type EstimateResult } from '../logic/estimate'
 import { formatCm, parseLengthCm, parseWeightKg } from '../logic/precision'
@@ -221,7 +221,9 @@ function genderText(gender: Gender): string {
       <div>
         <h1>{{ project.name }} · 量体录入</h1>
         <div class="sub">
-          规则版本 {{ project.ruleVersion }} ｜ 已录入 {{ project.persons.length }} 条 ｜
+          规则版本 {{ project.ruleVersion }}
+          <span v-if="!isRuleActive(project.ruleVersion)" class="badge badge-warn">该版本已从规则列表移除，项目仍按锁定版本解释</span>
+          ｜ 已录入 {{ project.persons.length }} 条 ｜
           本机离线保存，回办公室可一次性导出
         </div>
       </div>

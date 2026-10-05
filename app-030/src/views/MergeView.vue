@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { ensureMerged, flushProject, getProject, getRule, persistProject, store } from '../logic/store'
+import { ensureMerged, flushProject, getProject, getRule, isRuleActive, persistProject, store } from '../logic/store'
 import { buildSummary, conservationText } from '../logic/merge'
 import { alignToStep, isSizeCodeValid, normalizeSizeCodeInput, specialFlagLabel } from '../logic/sizeRules'
 import { chestWaistDiffCm, cmToHalfUnits, formatCm, formatHalfUnits } from '../logic/precision'
@@ -272,8 +272,9 @@ const rowLabel = (sizeCode: string, isSpecial: boolean): string =>
       <div>
         <h1>{{ project.name }} · 归并结果与人工覆写</h1>
         <div class="sub">
-          依据规则版本 <b>{{ project.ruleVersion }}</b>（{{ rule.label }}）｜
-          归并 {{ project.persons.length }} 人耗时 {{ project.perf?.mergeMs ?? 0 }} ms
+          依据规则版本 <b>{{ project.ruleVersion }}</b>（{{ rule.label }}）
+          <span v-if="!isRuleActive(project.ruleVersion)" class="badge badge-warn">该版本已从规则列表移除，项目仍按锁定版本解释</span>
+          ｜ 归并 {{ project.persons.length }} 人耗时 {{ project.perf?.mergeMs ?? 0 }} ms
         </div>
       </div>
       <div class="spacer"></div>

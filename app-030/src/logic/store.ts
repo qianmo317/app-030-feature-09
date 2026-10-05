@@ -6,10 +6,12 @@ import { computed, reactive, toRaw } from 'vue'
 import type { Project, ProjectKind, SizeRule } from './types'
 import { BUILTIN_RULES, DEFAULT_RULE_VERSION, ruleByVersion } from './sizeRules'
 import { runMerge } from './merge'
+import { appendAudit } from './audit'
 import {
   STORE_META,
   STORE_PROJECTS,
   STORE_RULES,
+  STORE_RULES_ARCHIVE,
   idbDelete,
   idbGetAll,
   idbPut,
@@ -34,6 +36,13 @@ export const store = reactive<AppStore>({
 
 export const ruleVersions = computed(() => store.rules.map((rule) => rule.version))
 
+/**
+ * 已删除自定义版本的归档（按 version 索引）。
+ * 版本从列表删除后不再出现在规则列表与新建项目下拉里，但锁定过该版本的项目页
+ * 仍能按项目自己锁定的版本把规则读回来，不会空白、也不会串到别的版本。
+ */
+const archivedRules = new Map<string, SizeRule>()
+
 const persistTimers = new Map<string, number>()
 
 function sortProjects(): void {
@@ -42,11 +51,14 @@ function sortProjects(): void {
 
 export async function initStore(): Promise<void> {
   try {
-    const [projects, rules, meta] = await Promise.all([
+    const [projects, rules, meta, archived] = await Promise.all([
       idbGetAll<Project>(STORE_PROJECTS),
       idbGetAll<SizeRule>(STORE_RULES),
-      idbGetAll<MetaEntry>(STORE_META)
+      idbGetAll<MetaEntry>(STORE_META),
+      idbGetAll<SizeRule>(STORE_RULES_ARCHIVE)
     ])
+    archivedRules.clear()
+    for (const rule of archived) archivedRules.set(rule.version, rule)
     const customRules = rules.filter((rule) => !rule.builtin)
     store.rules = [...BUILTIN_RULES, ...customRules].sort((a, b) =>
       a.effectiveFrom === b.effectiveFrom
@@ -75,8 +87,21 @@ export function getProject(id: string | string[]): Project | undefined {
   return store.projects.find((project) => project.id === key)
 }
 
+/**
+ * 按版本号取规则：先查在用列表，再查已删除版本的归档（项目锁定版本不随列表增删而变），
+ * 最后才兜底到首个可用版本，避免项目页因列表里少了一版而空白或串到别的版本。
+ */
 export function getRule(version: string): SizeRule {
+  const active = store.rules.find((rule) => rule.version === version)
+  if (active) return active
+  const archived = archivedRules.get(version)
+  if (archived) return archived
   return ruleByVersion(store.rules, version)
+}
+
+/** 该版本是否仍在在用列表中（false 表示已删除归档或从未存在） */
+export function isRuleActive(version: string): boolean {
+  return store.rules.some((rule) => rule.version === version)
 }
 
 export function projectsUsingRule(version: string): Project[] {
@@ -98,11 +123,13 @@ export async function createProject(input: {
   ruleVersion: string
 }): Promise<Project> {
   const now = Date.now()
+  // 只允许锁定在用列表里的版本，避免下拉残留已删除版本导致新项目锁定到失效版本
+  const ruleVersion = isRuleActive(input.ruleVersion) ? input.ruleVersion : DEFAULT_RULE_VERSION
   const project: Project = {
     id: makeProjectId(),
     name: input.name.trim(),
     kind: input.kind,
-    ruleVersion: input.ruleVersion || DEFAULT_RULE_VERSION,
+    ruleVersion,
     batches: input.batches.length > 0 ? input.batches : [],
     persons: [],
     imports: [],
@@ -171,12 +198,57 @@ export async function saveRule(rule: SizeRule): Promise<void> {
       ? a.version.localeCompare(b.version)
       : a.effectiveFrom.localeCompare(b.effectiveFrom)
   )
+  // 同名版本重新启用时清掉归档里的旧快照，保证归档只保留「已删除」的版本
+  archivedRules.delete(rule.version)
+  await idbDelete(STORE_RULES_ARCHIVE, rule.version)
   await idbPut(STORE_RULES, toRaw(rule))
 }
 
-export async function deleteRule(version: string): Promise<void> {
-  store.rules = store.rules.filter((rule) => rule.version !== version)
+export type RuleDeleteResult =
+  | { ok: true }
+  | { ok: false; reason: 'builtin' | 'in_use' | 'missing'; usedBy: Project[] }
+
+/**
+ * 删除自定义规则版本。内置版本与被项目引用的版本一律拦下，并说明拦下原因；
+ * 确认无人引用的版本移入归档（项目页仍可按锁定版本读回规则），从在用列表移除。
+ * 删除与拦下都会写入本机留痕。
+ */
+export async function deleteRule(version: string): Promise<RuleDeleteResult> {
+  const rule = store.rules.find((item) => item.version === version)
+  if (!rule) return { ok: false, reason: 'missing', usedBy: [] }
+  if (rule.builtin) {
+    await appendAudit({
+      action: 'rule_delete_blocked',
+      version: rule.version,
+      label: rule.label,
+      detail: '内置版本为只读基线，任何情况下不可删除',
+      operator: store.operator
+    })
+    return { ok: false, reason: 'builtin', usedBy: [] }
+  }
+  const usedBy = projectsUsingRule(version)
+  if (usedBy.length > 0) {
+    await appendAudit({
+      action: 'rule_delete_blocked',
+      version: rule.version,
+      label: rule.label,
+      detail: `正被 ${usedBy.length} 个项目引用：${usedBy.map((project) => `「${project.name}」`).join('、')}`,
+      operator: store.operator
+    })
+    return { ok: false, reason: 'in_use', usedBy }
+  }
+  archivedRules.set(rule.version, toRaw(rule))
+  await idbPut(STORE_RULES_ARCHIVE, toRaw(rule))
+  store.rules = store.rules.filter((item) => item.version !== version)
   await idbDelete(STORE_RULES, version)
+  await appendAudit({
+    action: 'rule_deleted',
+    version: rule.version,
+    label: rule.label,
+    detail: '未被任何项目引用，已从版本列表与新建项目下拉移除；已导出的下单表不受影响',
+    operator: store.operator
+  })
+  return { ok: true }
 }
 
 export async function setOperator(name: string): Promise<void> {
