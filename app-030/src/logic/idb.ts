@@ -3,11 +3,12 @@
  */
 
 const DB_NAME = 'app030-uniform-tally'
-const DB_VERSION = 1
+const DB_VERSION = 2
 
 export const STORE_PROJECTS = 'projects'
 export const STORE_RULES = 'rules'
 export const STORE_META = 'meta'
+export const STORE_AUDIT = 'ruleAudit'
 
 export type MetaEntry = { key: string; value: string }
 
@@ -29,6 +30,9 @@ export function openDb(): Promise<IDBDatabase> {
         if (!db.objectStoreNames.contains(STORE_PROJECTS)) db.createObjectStore(STORE_PROJECTS, { keyPath: 'id' })
         if (!db.objectStoreNames.contains(STORE_RULES)) db.createObjectStore(STORE_RULES, { keyPath: 'version' })
         if (!db.objectStoreNames.contains(STORE_META)) db.createObjectStore(STORE_META, { keyPath: 'key' })
+        // v2：规则删除 / 拦下动作的本机留痕
+        if (!db.objectStoreNames.contains(STORE_AUDIT))
+          db.createObjectStore(STORE_AUDIT, { keyPath: 'id', autoIncrement: true })
       }
       request.onsuccess = () => resolve(request.result)
       request.onerror = () => reject(request.error ?? new Error('IndexedDB 打开失败'))
@@ -63,6 +67,11 @@ export function idbGet<T>(storeName: string, key: string): Promise<T | undefined
 
 export function idbPut<T>(storeName: string, value: T): Promise<void> {
   return runRequest<void>(storeName, 'readwrite', (store) => store.put(value))
+}
+
+/** 追加一条记录，返回自增主键（用于审计留痕这种 keyPath autoIncrement 的仓库） */
+export function idbAdd<T>(storeName: string, value: T): Promise<number> {
+  return runRequest<number>(storeName, 'readwrite', (store) => store.add(value))
 }
 
 export function idbPutMany<T>(storeName: string, values: T[]): Promise<void> {

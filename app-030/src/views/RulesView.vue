@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { computed, reactive, ref, watch } from 'vue'
-import { getRule, projectsUsingRule, saveRule, store } from '../logic/store'
+import { computed, onMounted, reactive, ref, watch } from 'vue'
+import { getRule, projectsUsingRule, requestDeleteRule, saveRule, store } from '../logic/store'
+import { listRuleAudit } from '../logic/audit'
 import { alignToStep } from '../logic/sizeRules'
 import { cmToHalfUnits, formatHalfUnits } from '../logic/precision'
-import type { FitRange, Gender, SizeRule } from '../logic/types'
+import type { FitRange, Gender, Project, RuleAuditEntry, SizeRule } from '../logic/types'
 
 function cloneRule(rule: SizeRule): SizeRule {
   return JSON.parse(JSON.stringify(rule)) as SizeRule
@@ -19,6 +20,89 @@ const okText = ref('')
 const currentRule = computed(() => getRule(selectedVersion.value))
 const usedBy = computed(() => projectsUsingRule(selectedVersion.value))
 const canOverwrite = computed(() => !currentRule.value.builtin && usedBy.value.length === 0)
+
+/* ------------------------------- 删除版本弹窗 ------------------------------ */
+
+type DeleteState = {
+  version: string
+  label: string
+  builtin: boolean
+  usedBy: Project[]
+  busy: boolean
+  /** 已经向本机留痕登记过一次拦截结果，避免重复点击产生重复留痕 */
+  blockedLogged: boolean
+  error: string
+}
+
+const deleteState = ref<DeleteState | null>(null)
+const auditEntries = ref<RuleAuditEntry[]>([])
+
+onMounted(() => {
+  void refreshAudit()
+})
+
+async function refreshAudit(): Promise<void> {
+  auditEntries.value = await listRuleAudit(10)
+}
+
+/** 列表里每一行的删除入口：内置版 / 被项目引用的版本都会在这里被拦下并说清原因 */
+function askDelete(rule: SizeRule): void {
+  errorText.value = ''
+  okText.value = ''
+  deleteState.value = {
+    version: rule.version,
+    label: rule.label,
+    builtin: rule.builtin,
+    usedBy: projectsUsingRule(rule.version),
+    busy: false,
+    blockedLogged: false,
+    error: ''
+  }
+}
+
+function closeDelete(): void {
+  if (deleteState.value?.busy) return
+  deleteState.value = null
+}
+
+async function confirmDelete(): Promise<void> {
+  const state = deleteState.value
+  if (!state || state.busy) return
+  state.busy = true
+  state.error = ''
+  try {
+    const result = await requestDeleteRule(state.version)
+    await refreshAudit()
+    if (result.deleted) {
+      // 删掉的版本要从列表与选中项里一起消失，自动选到剩下的第一个版本
+      if (selectedVersion.value === result.version) {
+        selectedVersion.value = store.rules[0]?.version ?? ''
+      }
+      okText.value = `版本 ${result.version} 已删除；该版本没有项目引用，新建项目的版本下拉中也已移除。`
+      deleteState.value = null
+    } else if (result.reason === 'missing') {
+      state.error = `版本 ${state.version} 已不在列表中（可能已在其它标签页删除），请刷新页面确认。`
+    } else {
+      // 拦下动作已经留痕：刷新弹窗里的项目清单与下方留痕表，且不允许重复登记
+      state.usedBy = result.usedBy
+      state.builtin = result.reason === 'builtin'
+      state.error = result.audit?.reason ?? '该版本不允许删除'
+      state.blockedLogged = true
+    }
+  } catch (error) {
+    state.error = error instanceof Error ? error.message : String(error)
+  } finally {
+    if (deleteState.value) deleteState.value.busy = false
+  }
+}
+
+function formatAuditTime(value: number): string {
+  return new Date(value).toLocaleString('zh-CN')
+}
+
+function auditActionText(entry: RuleAuditEntry): string {
+  return entry.action === 'rule_delete' ? '已删除' : '删除被拦下'
+}
 
 watch(selectedVersion, (version) => {
   form.value = cloneRule(getRule(version))
@@ -132,7 +216,7 @@ async function saveAsNew(): Promise<void> {
       <div class="card-head">
         <h2>规则版本列表（{{ store.rules.length }}）</h2>
         <div class="spacer"></div>
-        <span class="hint">内置版本为只读，改规则请「另存为新版本」</span>
+        <span class="hint">内置版本为只读，改规则请「另存为新版本」；没人用的自定义版本可删除</span>
       </div>
       <div class="table-wrap">
         <table class="data-table">
@@ -149,6 +233,7 @@ async function saveAsNew(): Promise<void> {
               <th>女装型别</th>
               <th>引用项目</th>
               <th>来源</th>
+              <th>操作</th>
             </tr>
           </thead>
           <tbody>
@@ -174,9 +259,78 @@ async function saveAsNew(): Promise<void> {
                 </span>
               </td>
               <td>{{ rule.builtin ? '内置' : '自定义' }}</td>
+              <td>
+                <button class="btn btn-sm btn-danger" type="button" @click="askDelete(rule)">删除</button>
+              </td>
             </tr>
           </tbody>
         </table>
+      </div>
+    </div>
+
+    <!-- 删除确认 / 拦截弹窗：内置版不许删，被项目引用要列清是哪几个项目 -->
+    <div v-if="deleteState" class="modal-overlay" @click.self="closeDelete">
+      <div class="modal" role="dialog" aria-modal="true" :aria-label="`删除规则版本 ${deleteState.version}`">
+        <h3 class="modal-title">删除规则版本 {{ deleteState.version }}</h3>
+
+        <template v-if="deleteState.builtin">
+          <p class="notice notice-error">
+            <b>该版本是内置版本（{{ deleteState.label }}），一直不允许删除。</b>
+          </p>
+          <p class="hint">内置的两个规则版本是旧项目兼容与兜底解释的基线，只能「另存为新版本」，不能删除。</p>
+          <p class="hint">点下方按钮会在本机留痕一条「删除被拦下」的记录。</p>
+        </template>
+
+        <template v-else-if="deleteState.usedBy.length">
+          <p class="notice notice-error">
+            <b>该版本正被 {{ deleteState.usedBy.length }} 个项目使用，不能删除：</b>
+          </p>
+          <ul class="modal-project-list">
+            <li v-for="project in deleteState.usedBy" :key="project.id">
+              {{ project.name }}
+              <span class="hint">（{{ project.persons.length }} 条量体数据，锁定版本 {{ deleteState.version }}）</span>
+            </li>
+          </ul>
+          <p class="hint">
+            这些项目按自己锁定的版本解释号型。如需删除，请先删除或改用其它版本的项目。
+          </p>
+        </template>
+
+        <template v-else>
+          <p>
+            <b>确认删除自定义版本 {{ deleteState.version }}（{{ deleteState.label }}）？</b>
+          </p>
+          <p class="hint">
+            该版本当前没有项目引用，删除后会同时从版本列表和「新建项目」的版本下拉中消失，操作不可恢复。
+            已导出的下单表保存在本机文件里，不受影响。
+          </p>
+        </template>
+
+        <p v-if="deleteState.error" class="notice notice-error">{{ deleteState.error }}</p>
+
+        <div class="modal-actions">
+          <button class="btn" type="button" :disabled="deleteState.busy" @click="closeDelete">
+            {{ deleteState.blockedLogged ? '知道了' : '取消' }}
+          </button>
+          <button
+            v-if="deleteState.builtin || deleteState.usedBy.length > 0"
+            class="btn btn-danger"
+            type="button"
+            :disabled="deleteState.busy || deleteState.blockedLogged"
+            @click="confirmDelete"
+          >
+            {{ deleteState.busy ? '正在登记…' : deleteState.blockedLogged ? '已拦下并留痕' : '仍要删除（拦下并留痕）' }}
+          </button>
+          <button
+            v-else
+            class="btn btn-danger"
+            type="button"
+            :disabled="deleteState.busy"
+            @click="confirmDelete"
+          >
+            {{ deleteState.busy ? '正在删除…' : '确认删除' }}
+          </button>
+        </div>
       </div>
     </div>
 
@@ -345,6 +499,50 @@ async function saveAsNew(): Promise<void> {
             </div>
           </div>
         </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <div class="card-head">
+        <h2>删除操作本机留痕（最近 {{ auditEntries.length }} 条）</h2>
+        <div class="spacer"></div>
+        <span class="hint">删除成功与被拦下的动作都只记录在本机浏览器 IndexedDB，不联网、不上传</span>
+      </div>
+      <div v-if="auditEntries.length === 0" class="empty">
+        还没有删除相关操作。对内置版本或被项目引用的版本点「删除」会被拦下并留痕；确认没人用的自定义版本删除后也会在此记录。
+      </div>
+      <div v-else class="table-wrap">
+        <table class="data-table">
+          <thead>
+            <tr>
+              <th>时间</th>
+              <th>动作</th>
+              <th>版本</th>
+              <th>说明</th>
+              <th>引用项目（拦下时列出）</th>
+              <th>操作人</th>
+            </tr>
+          </thead>
+          <tbody>
+            <tr v-for="entry in auditEntries" :key="entry.id">
+              <td>{{ formatAuditTime(entry.at) }}</td>
+              <td>
+                <span class="badge" :class="entry.action === 'rule_delete' ? 'badge-info' : 'badge-warn'">
+                  {{ auditActionText(entry) }}
+                </span>
+              </td>
+              <td><b>{{ entry.version }}</b></td>
+              <td>{{ entry.reason }}</td>
+              <td>
+                <span v-if="entry.usedByProjects.length">
+                  {{ entry.usedByProjects.map((p) => p.name).join('、') }}
+                </span>
+                <span v-else class="hint">—</span>
+              </td>
+              <td>{{ entry.operator }}</td>
+            </tr>
+          </tbody>
+        </table>
       </div>
     </div>
   </section>

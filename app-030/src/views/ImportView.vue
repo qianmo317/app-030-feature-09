@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { flushProject, getProject, getRule, store } from '../logic/store'
+import { flushProject, getProject, projectRuleOrNull } from '../logic/store'
 import {
   EMPTY_MAPPING,
   IMPORT_FIELDS,
@@ -20,7 +20,8 @@ import { isXlsxFile, readXlsxRows } from '../logic/xlsx'
 
 const route = useRoute()
 const project = computed(() => getProject(route.params.id as string))
-const rule = computed(() => getRule(project.value?.ruleVersion ?? store.rules[0].version))
+// 始终按项目自己锁定的版本读规则：版本从列表删除后用项目内快照读回，不串到别的版本
+const rule = computed(() => (project.value ? projectRuleOrNull(project.value) : null))
 
 const fileInput = ref<HTMLInputElement | null>(null)
 const fileName = ref('')
@@ -159,6 +160,10 @@ function buildPreview(): void {
   resultText.value = ''
   fileError.value = ''
   if (!project.value) return
+  if (!rule.value) {
+    fileError.value = '项目锁定的规则版本在本机已找不到对应规则，无法生成导入预览'
+    return
+  }
   if (headerIndex.value < 0) {
     fileError.value = '请先选择文件'
     return
@@ -181,12 +186,17 @@ function buildPreview(): void {
 async function confirmImport(): Promise<void> {
   const current = project.value
   const preview = dryRun.value
+  const currentRule = rule.value
   if (!current || !preview) return
+  if (!currentRule) {
+    fileError.value = '项目锁定的规则版本在本机已找不到对应规则，无法导入'
+    return
+  }
   if (alreadyImported.value) {
     fileError.value = '该文件指纹已导入过，为避免重复写入已阻止（同一文件幂等）'
     return
   }
-  const applied = applyImport(current, preview, rule.value)
+  const applied = applyImport(current, preview, currentRule)
   current.perf = {
     ...(current.perf ?? {}),
     importParseMs: preview.durationMs,
@@ -224,6 +234,10 @@ function formatSize(bytes: number): string {
 <template>
   <section v-if="!project" class="empty">项目不存在，请回到项目列表重新选择。</section>
   <section v-else>
+    <p v-if="!rule" class="notice notice-error">
+      项目「{{ project.name }}」锁定的规则版本 {{ project.ruleVersion }} 在本机已找不到对应规则，不能生成导入预览或正式导入；
+      项目数据未受影响，请核对本机规则库。
+    </p>
     <div class="page-head">
       <div>
         <h1>{{ project.name }} · 批量导入</h1>

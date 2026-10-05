@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { ensureMerged, flushProject, getProject, getRule, persistProject, store } from '../logic/store'
+import { ensureMerged, flushProject, getProject, persistProject, projectRuleOrNull, store } from '../logic/store'
 import { buildSummary, conservationText } from '../logic/merge'
 import { alignToStep, isSizeCodeValid, normalizeSizeCodeInput, specialFlagLabel } from '../logic/sizeRules'
 import { chestWaistDiffCm, cmToHalfUnits, formatCm, formatHalfUnits } from '../logic/precision'
@@ -9,7 +9,8 @@ import type { Person, PersonStatus } from '../logic/types'
 
 const route = useRoute()
 const project = computed(() => getProject(route.params.id as string))
-const rule = computed(() => getRule(project.value?.ruleVersion ?? store.rules[0].version))
+// 始终按项目自己锁定的版本读规则：版本从列表删除后用项目内快照读回，不串到别的版本
+const rule = computed(() => (project.value ? projectRuleOrNull(project.value) : null))
 
 if (project.value) ensureMerged(project.value)
 
@@ -17,7 +18,9 @@ onMounted(() => {
   if (project.value) void flushProject(project.value)
 })
 
-const summary = computed(() => (project.value ? buildSummary(project.value, rule.value) : null))
+const summary = computed(() =>
+  project.value && rule.value ? buildSummary(project.value, rule.value) : null
+)
 
 const search = ref('')
 const statusFilter = ref<'all' | 'active' | 'pending' | 'invalid' | 'duplicate' | 'overridden' | 'special'>('all')
@@ -133,8 +136,8 @@ const overrideForm = reactive({ sizeCode: '', by: '', reason: '' })
 
 const overrideCandidates = computed(() => {
   const target = overrideTarget.value
-  if (!target) return []
   const current = rule.value
+  if (!target || !current) return []
   const heightBase = alignToStep(
     cmToHalfUnits(target.heightCm),
     cmToHalfUnits(current.heightAnchor),
@@ -175,9 +178,10 @@ function closeOverride(): void {
 async function submitOverride(): Promise<void> {
   const target = overrideTarget.value
   const current = project.value
-  if (!target || !current) return
+  const currentRule = rule.value
+  if (!target || !current || !currentRule) return
   const code = normalizeSizeCodeInput(overrideForm.sizeCode)
-  if (!isSizeCodeValid(rule.value, code)) {
+  if (!isSizeCodeValid(currentRule, code)) {
     errorText.value = '号型格式不正确，应形如 170/88A（型别为 Y/A/B/C）'
     return
   }
@@ -193,7 +197,7 @@ async function submitOverride(): Promise<void> {
     sizeCode: code,
     ruleSizeCode: target.result?.ruleSizeCode ?? '',
     fit: target.result?.fit ?? null,
-    ruleVersion: rule.value.version,
+    ruleVersion: currentRule.version,
     manualOverride: {
       sizeCode: code,
       by: overrideForm.by.trim(),
@@ -209,13 +213,14 @@ async function submitOverride(): Promise<void> {
 
 async function revertOverride(person: Person): Promise<void> {
   const current = project.value
-  if (!person.result?.manualOverride || !current) return
+  const currentRule = rule.value
+  if (!person.result?.manualOverride || !current || !currentRule) return
   const override = person.result.manualOverride
   person.result = {
     sizeCode: person.result.ruleSizeCode || person.result.sizeCode,
     ruleSizeCode: person.result.ruleSizeCode,
     fit: person.result.fit,
-    ruleVersion: rule.value.version
+    ruleVersion: currentRule.version
   }
   ensureMerged(current)
   persistProject(current, true)
@@ -226,7 +231,8 @@ async function revertOverride(person: Person): Promise<void> {
 
 async function setSpecial(person: Person, code: string): Promise<void> {
   const current = project.value
-  if (!current) return
+  const currentRule = rule.value
+  if (!current || !currentRule) return
   person.specialFlag = code === '' ? null : code
   person.needsConfirm = false
   ensureMerged(current)
@@ -234,7 +240,7 @@ async function setSpecial(person: Person, code: string): Promise<void> {
   message.value =
     code === ''
       ? `已取消「${person.name}」的特殊体型标记`
-      : `已将「${person.name}」标记为${specialFlagLabel(rule.value, code)}，单列进定制清单，不混入常规档`
+      : `已将「${person.name}」标记为${specialFlagLabel(currentRule, code)}，单列进定制清单，不混入常规档`
 }
 
 async function setStatus(person: Person, status: PersonStatus, reason: string): Promise<void> {
@@ -262,11 +268,16 @@ async function clearDuplicateFlag(person: Person): Promise<void> {
 
 const genderText = (gender: string): string => (gender === 'male' ? '男' : '女')
 const rowLabel = (sizeCode: string, isSpecial: boolean): string =>
-  isSpecial ? `${specialFlagLabel(rule.value, sizeCode)}（${sizeCode}）` : sizeCode
+  rule.value && isSpecial ? `${specialFlagLabel(rule.value, sizeCode)}（${sizeCode}）` : sizeCode
 </script>
 
 <template>
-  <section v-if="!project || !summary" class="empty">项目不存在，请回到项目列表重新选择。</section>
+  <section v-if="!project" class="empty">项目不存在，请回到项目列表重新选择。</section>
+  <section v-else-if="!rule" class="empty">
+    项目「{{ project.name }}」锁定的规则版本 {{ project.ruleVersion }} 在本机已找不到对应规则，无法归并。
+    项目数据未受影响，请核对本机规则库。
+  </section>
+  <section v-else-if="!summary" class="empty">归并数据准备中…</section>
   <section v-else>
     <div class="page-head">
       <div>

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue'
 import { useRoute } from 'vue-router'
-import { ensureMerged, flushProject, getProject, getRule, store } from '../logic/store'
+import { ensureMerged, flushProject, getProject, projectRuleOrNull, store } from '../logic/store'
 import { buildSummary, conservationText } from '../logic/merge'
 import {
   buildOrderSheet,
@@ -21,20 +21,24 @@ import { chestWaistDiffCm, formatCm } from '../logic/precision'
 
 const route = useRoute()
 const project = computed(() => getProject(route.params.id as string))
-const rule = computed(() => getRule(project.value?.ruleVersion ?? store.rules[0].version))
+// 始终按项目自己锁定的版本读规则：版本从列表删除后用项目内快照读回，不串到别的版本
+const rule = computed(() => (project.value ? projectRuleOrNull(project.value) : null))
 
 if (project.value) ensureMerged(project.value)
 
-const summary = computed(() => (project.value ? buildSummary(project.value, rule.value) : null))
+const summary = computed(() =>
+  project.value && rule.value ? buildSummary(project.value, rule.value) : null
+)
 const message = ref('')
 
 function context() {
   const current = project.value
   const snapshot = summary.value
-  if (!current || !snapshot) return null
+  const ruleSnapshot = rule.value
+  if (!current || !snapshot || !ruleSnapshot) return null
   return {
     project: current,
-    rule: rule.value,
+    rule: ruleSnapshot,
     summary: snapshot,
     operator: store.operator,
     generatedAt: new Date()
@@ -121,7 +125,12 @@ const genderText = (gender: string): string => (gender === 'male' ? '男' : '女
 </script>
 
 <template>
-  <section v-if="!project || !summary || !orderSheet" class="empty">项目不存在，请回到项目列表重新选择。</section>
+  <section v-if="!project" class="empty">项目不存在，请回到项目列表重新选择。</section>
+  <section v-else-if="!rule" class="empty">
+    项目「{{ project.name }}」锁定的规则版本 {{ project.ruleVersion }} 在本机已找不到对应规则，无法导出。
+    已导出的下单表文件不受影响；项目数据未受影响，请核对本机规则库。
+  </section>
+  <section v-else-if="!summary || !orderSheet" class="empty">导出数据准备中…</section>
   <section v-else>
     <div class="page-head no-print">
       <div>

@@ -3,9 +3,10 @@
  * 数据只写在本机浏览器，没有任何服务端请求。
  */
 import { computed, reactive, toRaw } from 'vue'
-import type { Project, ProjectKind, SizeRule } from './types'
+import type { Project, ProjectKind, RuleAuditEntry, SizeRule } from './types'
 import { BUILTIN_RULES, DEFAULT_RULE_VERSION, ruleByVersion } from './sizeRules'
 import { runMerge } from './merge'
+import { appendRuleAudit, projectRefs } from './audit'
 import {
   STORE_META,
   STORE_PROJECTS,
@@ -61,6 +62,9 @@ export async function initStore(): Promise<void> {
     }
     store.projects = projects
     sortProjects()
+    // 旧数据（创建时还没存快照的项目）按当前列表补齐锁定版本快照并落盘，
+    // 保证以后即便对应版本从规则列表消失，项目仍能按自己锁定的这版读回。
+    await backfillLockedRules(projects, store.rules)
     const operator = meta.find((entry) => entry.key === 'operator')
     if (operator) store.operator = operator.value
     store.ready = true
@@ -77,6 +81,50 @@ export function getProject(id: string | string[]): Project | undefined {
 
 export function getRule(version: string): SizeRule {
   return ruleByVersion(store.rules, version)
+}
+
+/**
+ * 读取项目锁定的那一版规则：
+ * 1) 规则列表里还有该版本 → 用列表里的（仍在的自定义版本允许覆盖保存，以最新内容为准）；
+ * 2) 版本已从列表删除 → 用项目自己的 lockedRule 快照读回，不空白、不串到别的版本；
+ * 3) 两者都没有（理论上不会发生，删除被项目引用的版本会被拦下）→ 明确报错而不是悄悄用别版。
+ */
+export function getProjectRule(project: Project): SizeRule {
+  const live = store.rules.find((rule) => rule.version === project.ruleVersion)
+  if (live) return live
+  if (project.lockedRule && project.lockedRule.version === project.ruleVersion) return project.lockedRule
+  throw new RuleVersionMissingError(project.ruleVersion)
+}
+
+export class RuleVersionMissingError extends Error {
+  constructor(public readonly version: string) {
+    super(`项目锁定的规则版本 ${version} 在本机已找不到对应规则`)
+    this.name = 'RuleVersionMissingError'
+  }
+}
+
+/** 不抛错版本：规则（列表或快照）缺失时返回 null，由页面明确提示而不是空白或串版 */
+export function projectRuleOrNull(project: Project): SizeRule | null {
+  try {
+    return getProjectRule(project)
+  } catch {
+    return null
+  }
+}
+
+function cloneRule(rule: SizeRule): SizeRule {
+  return JSON.parse(JSON.stringify(rule)) as SizeRule
+}
+
+/** 补齐旧项目的 lockedRule 快照（仅在快照缺失 / 版本对不上时写盘） */
+async function backfillLockedRules(projects: Project[], rules: SizeRule[]): Promise<void> {
+  for (const project of projects) {
+    const matched = rules.find((rule) => rule.version === project.ruleVersion)
+    if (matched && project.lockedRule?.version !== project.ruleVersion) {
+      project.lockedRule = cloneRule(matched)
+      await idbPut(STORE_PROJECTS, toRaw(project))
+    }
+  }
 }
 
 export function projectsUsingRule(version: string): Project[] {
@@ -98,11 +146,15 @@ export async function createProject(input: {
   ruleVersion: string
 }): Promise<Project> {
   const now = Date.now()
+  const version = input.ruleVersion || DEFAULT_RULE_VERSION
+  const rule = store.rules.find((item) => item.version === version) ?? BUILTIN_RULES[0]
   const project: Project = {
     id: makeProjectId(),
     name: input.name.trim(),
     kind: input.kind,
-    ruleVersion: input.ruleVersion || DEFAULT_RULE_VERSION,
+    ruleVersion: rule.version,
+    // 建项目时把锁定版本的规则整版拷进项目，之后规则列表删版也不影响本项目
+    lockedRule: cloneRule(rule),
     batches: input.batches.length > 0 ? input.batches : [],
     persons: [],
     imports: [],
@@ -119,7 +171,8 @@ export async function createProject(input: {
  * 结果始终来自项目锁定的规则版本，规则改版不会改变既有项目结果。
  */
 export function ensureMerged(project: Project): number {
-  const rule = getRule(project.ruleVersion)
+  const rule = projectRuleOrNull(project)
+  if (!rule) return 0
   const result = runMerge(project, rule)
   project.perf = { ...(project.perf ?? {}), mergeMs: result.durationMs, mergeCount: project.persons.length }
   return result.durationMs
@@ -174,9 +227,61 @@ export async function saveRule(rule: SizeRule): Promise<void> {
   await idbPut(STORE_RULES, toRaw(rule))
 }
 
-export async function deleteRule(version: string): Promise<void> {
-  store.rules = store.rules.filter((rule) => rule.version !== version)
+export type DeleteRuleResult =
+  | { deleted: true; version: string; audit: RuleAuditEntry }
+  | { deleted: false; reason: 'builtin' | 'in_use' | 'missing'; usedBy: Project[]; audit: RuleAuditEntry | null }
+
+/**
+ * 删除规则版本的唯一入口：
+ * - 内置版本不许删；
+ * - 正被项目引用的版本不许删，调用方需把「哪几个项目在用」说清楚；
+ * - 确定没人用的自定义版本才删（先写留痕、再删数据）；
+ * - 删除成功与被拦下都在本机留痕。
+ */
+export async function requestDeleteRule(version: string): Promise<DeleteRuleResult> {
+  const rule = store.rules.find((item) => item.version === version)
+  const usedBy = projectsUsingRule(version)
+
+  if (rule?.builtin) {
+    const audit = await appendRuleAudit({
+      action: 'rule_delete_blocked',
+      version,
+      label: rule.label,
+      builtin: true,
+      usedByProjects: projectRefs(usedBy),
+      reason: '内置规则版本不允许删除'
+    })
+    return { deleted: false, reason: 'builtin', usedBy, audit }
+  }
+
+  if (usedBy.length > 0) {
+    const names = usedBy.map((project) => project.name).join('、')
+    const audit = await appendRuleAudit({
+      action: 'rule_delete_blocked',
+      version,
+      label: rule?.label ?? '',
+      builtin: false,
+      usedByProjects: projectRefs(usedBy),
+      reason: `版本 ${version} 正被 ${usedBy.length} 个项目使用：${names}`
+    })
+    return { deleted: false, reason: 'in_use', usedBy, audit }
+  }
+
+  // 列表里已经没有了（可能其它标签页刚删），按幂等处理，不写删除留痕
+  if (!rule) return { deleted: false, reason: 'missing', usedBy: [], audit: null }
+
+  const audit = await appendRuleAudit({
+    action: 'rule_delete',
+    version,
+    label: rule.label,
+    builtin: false,
+    usedByProjects: [],
+    reason: `自定义版本 ${version} 经确认无项目引用，已删除`
+  })
+
+  store.rules = store.rules.filter((item) => item.version !== version)
   await idbDelete(STORE_RULES, version)
+  return { deleted: true, version, audit }
 }
 
 export async function setOperator(name: string): Promise<void> {

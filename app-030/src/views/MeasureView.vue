@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, nextTick, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
-import { flushProject, getProject, getRule, persistProject, store } from '../logic/store'
+import { flushProject, getProject, persistProject, projectRuleOrNull } from '../logic/store'
 import { analyzeDraft, findDuplicateIds, makePersonId, type PersonDraft } from '../logic/analyze'
 import { estimateInitialSize, type EstimateResult } from '../logic/estimate'
 import { formatCm, parseLengthCm, parseWeightKg } from '../logic/precision'
@@ -12,7 +12,8 @@ import type { Gender, Person } from '../logic/types'
 
 const route = useRoute()
 const project = computed(() => getProject(route.params.id as string))
-const rule = computed(() => getRule(project.value?.ruleVersion ?? store.rules[0].version))
+// 始终按项目自己锁定的版本读规则：版本从列表删除后用项目内快照读回，不串到别的版本
+const rule = computed(() => (project.value ? projectRuleOrNull(project.value) : null))
 
 const formRef = ref<HTMLFormElement | null>(null)
 const heightRef = ref<HTMLInputElement | null>(null)
@@ -77,9 +78,11 @@ const duplicateNames = computed(() =>
 )
 
 const estimate = computed<EstimateResult | null>(() => {
+  const currentRule = rule.value
+  if (!currentRule) return null
   const heightCm = parseLengthCm(form.heightCm)
   const weightKg = parseWeightKg(form.weightKg)
-  return estimateInitialSize(rule.value, form.gender, heightCm, weightKg)
+  return estimateInitialSize(currentRule, form.gender, heightCm, weightKg)
 })
 
 const recent = computed<Person[]>(() => {
@@ -118,7 +121,12 @@ function onEnter(event: KeyboardEvent): void {
 
 async function save(): Promise<void> {
   const current = project.value
+  const currentRule = rule.value
   if (!current || saving.value) return
+  if (!currentRule) {
+    warnText.value = '项目锁定的规则版本在本机已找不到对应规则，暂不能录入，请先核对本机规则库'
+    return
+  }
   notice.value = ''
   warnText.value = ''
   if (form.name.trim() === '') {
@@ -140,7 +148,7 @@ async function save(): Promise<void> {
     sourceRow: current.persons.length + 1,
     source: 'manual'
   }
-  const outcome = analyzeDraft(draft, rule.value)
+  const outcome = analyzeDraft(draft, currentRule)
   const duplicated = findDuplicateIds(current.persons, draft)
   const person: Person = {
     id: makePersonId(),
@@ -194,10 +202,11 @@ async function removePerson(person: Person): Promise<void> {
 
 async function exportFallbackCsv(): Promise<void> {
   const current = project.value
-  if (!current) return
-  runMerge(current, rule.value)
+  const currentRule = rule.value
+  if (!current || !currentRule) return
+  runMerge(current, currentRule)
   await flushProject(current)
-  const rows = detailRows({ project: current, rule: rule.value })
+  const rows = detailRows({ project: current, rule: currentRule })
   downloadText(
     toCsvText(rows),
     `${current.name.replace(/[\\/:*?"<>|\s]/g, '_')}-量体明细-离线兜底.csv`
@@ -216,6 +225,10 @@ function genderText(gender: Gender): string {
 
 <template>
   <section v-if="!project" class="empty">项目不存在，请回到项目列表重新选择。</section>
+  <section v-else-if="!rule" class="empty">
+    项目「{{ project.name }}」锁定的规则版本 {{ project.ruleVersion }} 在本机已找不到对应规则，暂不能录入。
+    项目数据未受影响，请核对本机规则库。
+  </section>
   <section v-else>
     <div class="page-head">
       <div>

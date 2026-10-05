@@ -110,6 +110,12 @@ export type Project = {
   kind: ProjectKind
   /** 项目锁定的规则版本：规则改版后旧项目仍按旧版本解释 */
   ruleVersion: string
+  /**
+   * 项目锁定版本的规则快照：创建项目时拷入。
+   * 版本即使后来从规则列表删除（仅允许删除无人引用的版本），
+   * 项目页也按自己锁定的这版规则读回，不空白、不串到别的版本。
+   */
+  lockedRule: SizeRule | null
   batches: string[]
   persons: Person[]
   imports: ImportRecord[]
@@ -119,3 +125,19 @@ export type Project = {
 }
 
 export type SummaryRow = { sizeCode: string; gender: Gender; qty: number; isSpecial: boolean }
+
+/** 规则删除相关操作的本机留痕（删除成功 / 被拦下），只写本机 IndexedDB */
+export type RuleAuditEntry = {
+  /** 自增主键 */
+  id: number
+  at: number
+  /** delete = 删除成功；blocked = 触发了删除但被规则拦下（内置 / 被项目引用） */
+  action: 'rule_delete' | 'rule_delete_blocked'
+  version: string
+  label: string
+  builtin: boolean
+  operator: string
+  /** 被拦下时，说明是哪几个项目在用 */
+  usedByProjects: { id: string; name: string }[]
+  reason: string
+}
